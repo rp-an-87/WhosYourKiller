@@ -7,18 +7,18 @@ using HarmonyLib;
 
 namespace WhosYourKiller
 {
-	// Invented-but-consistent career for "scav users" (scavs that carry a player-like name), seeded by the bot's profile id so the same bot always
+	// Invented-but-consistent career for PMC bots, seeded by the bot's profile id so the same bot always
 	// shows the same numbers. Three steps, each one built on the previous:
 	//   1. baseline stats from progress (prestige x 70 + level)
 	//   2. the SAIN personality skews those stats
 	//   3. achievements are derived from the stats (hard requirements first, chance only where the stats cannot decide)
 	internal static class FlavorStats
 	{
-		// A scav user is a Savage assault bot that got a random PMC name in MainProfileNickname (BotGenerator.ShouldSimulatePlayerScav on the server)
-		internal static bool IsScavUser(Profile profile)
+		// Only PMC bots get an invented career; scavs, raiders, rogues, bosses and cultists stay gear-only
+		internal static bool GetsCareer(Profile profile)
 		{
-			var info = profile?.Info;
-			return info != null && info.Side == EPlayerSide.Savage && info.Settings?.Role == WildSpawnType.assault && !string.IsNullOrEmpty(info.MainProfileNickname);
+			var role = profile?.Info?.Settings?.Role;
+			return role == WildSpawnType.pmcBEAR || role == WildSpawnType.pmcUSEC;
 		}
 
 		// ---- SAIN personality (soft dependency, through the reflection entry point SAIN provides) ----
@@ -49,7 +49,7 @@ namespace WhosYourKiller
 		// ---- step 2: personality skew (multipliers on the baseline) ----
 		private class Skew
 		{
-			public float Survival = 1, Kd = 1, Leave = 1, Run = 1, RaidLength = 1, Streak = 1;
+			public float Survival = 1, Kd = 1 /* kills per raid */, Leave = 1, Run = 1, RaidLength = 1, Streak = 1;
 			public float PmcKillShare = 1;   // share of kills that were PMCs
 			public float Melee = 1;          // melee kills
 			public float Aggro = 1;          // flashed kills, fights on purpose
@@ -61,13 +61,13 @@ namespace WhosYourKiller
 		{
 			switch (personality)
 			{
-				case "GigaChad": return new Skew { Survival = 1.25f, Kd = 2.4f, RaidLength = 1.05f, Streak = 1.3f, PmcKillShare = 1.6f, Melee = 1.5f, Aggro = 1.5f };
-				case "Chad": return new Skew { Survival = 1.12f, Kd = 1.8f, RaidLength = 1.05f, Streak = 1.15f, PmcKillShare = 1.4f, Melee = 2f, Aggro = 1.5f };
+				case "GigaChad": return new Skew { Survival = 1.25f, Kd = 1.9f, RaidLength = 0.85f, Streak = 1.3f, PmcKillShare = 1.6f, Melee = 1.5f, Aggro = 1.5f };
+				case "Chad": return new Skew { Survival = 1.12f, Kd = 1.4f, RaidLength = 0.8f, Streak = 1.15f, PmcKillShare = 1.4f, Melee = 2f, Aggro = 1.5f };
 				case "Wreckless": return new Skew { Survival = 0.7f, Kd = 1.6f, RaidLength = 0.55f, Run = 0.4f, Streak = 0.6f, PmcKillShare = 1.2f, Melee = 3f, Aggro = 3f, Explore = 0.6f };
-				case "SnappingTurtle": return new Skew { Survival = 1.15f, Kd = 1.15f, RaidLength = 1.5f, Streak = 1.3f, Explore = 0.8f };
-				case "Rat": return new Skew { Survival = 1.45f, Kd = 0.8f, Leave = 0.6f, Run = 1.7f, RaidLength = 1.55f, Streak = 1.8f, PmcKillShare = 0.6f, Melee = 1.2f, Explore = 1.8f, Coop = 1.5f };
-				case "Timmy": return new Skew { Survival = 0.75f, Kd = 0.55f, Leave = 1.3f, RaidLength = 0.7f, Streak = 0.5f, PmcKillShare = 0.6f, Melee = 0.3f, Coop = 2.5f };
-				case "Coward": return new Skew { Survival = 0.9f, Kd = 0.5f, Leave = 3.5f, Run = 2.2f, RaidLength = 0.55f, Streak = 0.9f, PmcKillShare = 0.5f, Melee = 0.3f, Explore = 1.6f, Coop = 2.5f };
+				case "SnappingTurtle": return new Skew { Survival = 1.15f, Kd = 1.0f, RaidLength = 1.5f, Streak = 1.3f, Explore = 0.8f };
+				case "Rat": return new Skew { Survival = 1.45f, Kd = 0.4f, Leave = 0.6f, Run = 1.7f, RaidLength = 1.55f, Streak = 1.8f, PmcKillShare = 0.6f, Melee = 1.2f, Explore = 1.8f, Coop = 1.5f };
+				case "Timmy": return new Skew { Survival = 0.75f, Kd = 0.35f, Leave = 1.3f, RaidLength = 0.7f, Streak = 0.5f, PmcKillShare = 0.6f, Melee = 0.3f, Coop = 2.5f };
+				case "Coward": return new Skew { Survival = 0.9f, Kd = 0.25f, Leave = 3.5f, Run = 2.2f, RaidLength = 0.55f, Streak = 0.9f, PmcKillShare = 0.5f, Melee = 0.3f, Explore = 1.6f, Coop = 2.5f };
 				default: return new Skew();
 			}
 		}
@@ -127,6 +127,49 @@ namespace WhosYourKiller
 			"66e2a7e5919bad697104f4b3", // Highway to the Danger Zone
 		};
 
+		// ---- archetypes: how much and how well they play ----
+		private class Archetype
+		{
+			public string Name;
+			public float Volume = 1;              // dedication: extra raids on top of what the XP needs
+			public float BaseKpr = 5f;             // kills per raid: skill, hardly tied to level
+			public float BaseSurvival = 0.46f;    // survival rate: same
+			public float Leave = 1, Run = 1, RaidLength = 1;
+			public float Menu = 1.3f;          // total online time per hour spent in raids (stash, hideout, flea, loadouts)
+		}
+
+		private static readonly Archetype Nolifer = new Archetype { Name = "Nolifer", Menu = 5.5f, Volume = 1.8f, BaseKpr = 5.5f, BaseSurvival = 0.48f, Leave = 0.6f, Run = 0.7f, RaidLength = 1.1f };
+		private static readonly Archetype Streamer = new Archetype { Name = "Streamer", Menu = 6.5f, Volume = 2.0f, BaseKpr = 6.5f, BaseSurvival = 0.52f, Leave = 0.5f, Run = 0.6f };
+		private static readonly Archetype Grinder = new Archetype { Name = "Grinder", BaseKpr = 5.0f, BaseSurvival = 0.46f, Menu = 2f, Volume = 1.25f, Leave = 0.8f };
+		private static readonly Archetype Average = new Archetype { Name = "Average" };
+		// knows the game inside out: few raids for the level, efficient, hardly ever bails out
+		private static readonly Archetype Veteran = new Archetype { Name = "Veteran", Menu = 1.1f, Volume = 1f, BaseKpr = 5.6f, BaseSurvival = 0.48f, Leave = 0.1f, Run = 0.05f, RaidLength = 0.7f };
+		private static readonly Archetype Casual = new Archetype { Name = "Casual", Menu = 1.15f, Volume = 1f, BaseKpr = 4.0f, BaseSurvival = 0.42f, Leave = 1.4f, Run = 1.2f, RaidLength = 0.9f };
+		private static readonly Archetype Newcomer = new Archetype { Name = "Newcomer", Menu = 1.1f, Volume = 1f, BaseKpr = 3.0f, BaseSurvival = 0.36f, Leave = 1.6f, Run = 1.3f, RaidLength = 0.8f };
+
+		// Chances shift with progress: the long-time grinders are rare early, newcomers are rare late
+		private static Archetype PickArchetype(Random rng, int progress)
+		{
+			var t = Clamp(progress / 79f, 0f, 1f);
+			var kinds = new[] { Nolifer, Streamer, Grinder, Average, Casual, Newcomer, Veteran };
+			var weights = new[] { 3f * (0.3f + 1.4f * t), 4f * (0.5f + 1.0f * t), 15f * (0.6f + 0.8f * t), 58f, 15f * (1.3f - 0.6f * t), 5f * (1.0f - 0.9f * t), 6f * (0.1f + 1.2f * t) };
+
+			var total = 0f;
+			foreach (var w in weights) total += w;
+
+			var roll = (float)rng.NextDouble() * total;
+			for (var i = 0; i < kinds.Length; i++)
+			{
+				roll -= weights[i];
+				if (roll <= 0f) return kinds[i];
+			}
+
+			return Average;
+		}
+
+		// online time of a mocked PMC career -> its raid-only time, so the stats panel can show a sane "average life span"
+		internal static readonly Dictionary<long, long> RaidSecondsByTotal = new Dictionary<long, long>();
+
 		// ---- helpers ----
 		private static int StableSeed(string text)
 		{
@@ -144,6 +187,14 @@ namespace WhosYourKiller
 		private static float Range(Random rng, float min, float max) => min + (float)rng.NextDouble() * (max - min);
 
 		private static float Clamp(float value, float min, float max) => value < min ? min : value > max ? max : value;
+
+		// Normal-distributed random number (mean 0, deviation 1)
+		private static double Gauss(Random rng)
+		{
+			var u1 = 1.0 - rng.NextDouble();
+			var u2 = rng.NextDouble();
+			return Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+		}
 
 		// Number of events with the given average (Knuth for small averages, normal approximation for large ones)
 		private static int Poisson(Random rng, double lambda)
@@ -173,8 +224,12 @@ namespace WhosYourKiller
 			return count;
 		}
 
+		// nobody has more than this many PMC raids; online time is capped at roughly the biggest streamers
+		private const int MaxRaids = 3000;
+		private const float MaxOnlineHours = 9000f;
+
 		// ---- the whole thing ----
-		internal static void Apply(OtherPlayerProfileDescriptor descriptor, string profileId, int level, int prestige, string personality)
+		internal static void Apply(OtherPlayerProfileDescriptor descriptor, string profileId, int level, int experience, int prestige, string personality)
 		{
 			var rng = new Random(StableSeed(profileId));
 			var skew = SkewFor(personality);
@@ -186,19 +241,43 @@ namespace WhosYourKiller
 			var registered = nowUnix - ageDays * 86400;
 			descriptor.Info.RegistrationDate = registered;
 
-			var skill = 1f + Math.Min(progress, 100) / 200f;                 // better players kill a little more as they progress
-			var pmcRaids = Math.Max(3, (int)(progress * Range(rng, 5f, 9f)));
+			var p = Math.Min(progress, 90);                                   // the curves flatten out around the top
+			// Archetype: how much and how well they play. It sits next to the personality (how they play) and both multiply every stat.
+			var arch = PickArchetype(rng, progress);
+			var gear = Math.Min(level, 79) / 79f;                               // a little better gear at higher levels, but the skill stays the same
+			var kpr = Clamp(arch.BaseKpr * (1f + 0.1f * gear) * Range(rng, 0.85f, 1.15f) * skew.Kd, 0.2f, 30f);        // kills per raid; K/D follows from kills and deaths
+			
+			// Raids follow from the XP the level needs. A typical player earns about kills-per-raid x 2400 XP per raid (measured on a real SPT profile), times a
+			// bonus for quests, bosses and the like that grows after level 48. Players who kill more than typical need fewer raids (efficiency), but players who
+			// kill less do not need more (they earn XP from surviving, quests and looting). So only dedication can push the raid count above the typical one.
+			var questBonus = 1f + Math.Max(0, level - 48) * 0.05f;
+			var xpTotal = experience + prestige * 19900000.0;                   // each earlier prestige is roughly a run to level 69
+			var typicalKpr = 5f * (1f + 0.1f * gear);                           // the average player, no personality or archetype
+			var typicalRaids = xpTotal / (typicalKpr * 2400f * questBonus);
+			var efficiency = Clamp(typicalKpr / kpr, 0.5f, 1.0f);
+			// dedication: extra raids that earn little XP (streamers, nolifers), with a spread between players of the same kind
+			var dedication = Clamp(Clamp((float)Math.Exp(Gauss(rng) * 0.15), 0.8f, 1.25f) * arch.Volume, 0.8f, 2.4f);
+
+
+			var pmcRaids = Math.Min(MaxRaids, Math.Max(3, (int)(typicalRaids * efficiency * dedication)));   // typical: level 28 ~90, 48 ~375, 69 ~620, 79 ~1800
 			var scavRaids = Math.Max(2, (int)(pmcRaids * Range(rng, 0.25f, 0.6f)));
 
-			var survivalRate = Clamp(Range(rng, 0.40f, 0.55f) * skew.Survival, 0.15f, 0.85f);
-			var kd = Clamp(Range(rng, 0.9f, 1.4f) * skill * skew.Kd, 0.3f, 6f);
-			var leaveRate = Clamp(0.06f * Range(rng, 0.7f, 1.3f) * skew.Leave, 0f, 0.4f);
-			var runRate = Clamp(0.08f * Range(rng, 0.7f, 1.3f) * skew.Run, 0f, 0.4f);
-			var minutes = Range(rng, 18f, 28f) * skew.RaidLength;
+			var survivalRate = Clamp(arch.BaseSurvival * (1f + 0.06f * gear) * Range(rng, 0.9f, 1.1f) * skew.Survival, 0.15f, 0.75f);
+			var leaveRate = Clamp((0.09f - 0.0006f * p) * Range(rng, 0.7f, 1.3f) * skew.Leave * arch.Leave, 0f, 0.4f);            // experienced players leave raids less
+			var runRate = Clamp(0.08f * Range(rng, 0.7f, 1.3f) * skew.Run * arch.Run, 0f, 0.4f);
+			var minutes = Range(rng, 22f, 32f) * skew.RaidLength * arch.RaidLength;
 
-			var pmc = BuildCareer(rng, pmcRaids, survivalRate, kd, leaveRate, runRate, minutes, skew.Streak);
-			var scav = BuildCareer(rng, scavRaids, Clamp(survivalRate * Range(rng, 0.8f, 1.1f), 0.1f, 0.85f), kd * Range(rng, 0.7f, 1.0f), leaveRate, runRate, minutes * 0.8f, skew.Streak);
+			var menu = arch.Menu * Range(rng, 0.8f, 1.25f);
+			// nobody levels faster than the best XP per hour: ~82k at level 48 (measured on an optimized profile), dropping as the quests and levels get harder
+			var xpPerHourMax = level <= 48 ? 82000f : 82000f - (level - 48) / 31f * 27000f;
+			var floorSeconds = (float)(xpTotal / xpPerHourMax * 3600.0) * Range(rng, 1.0f, 1.3f);
+			var raidSeconds = Math.Max(1f, pmcRaids * minutes * 60f);
+			menu = Math.Max(menu, floorSeconds / raidSeconds);                // the rest of the time is menus, hideout and flea
+			menu = Math.Max(1f, Math.Min(menu, MaxOnlineHours * 3600f / raidSeconds));
+			var pmc = BuildCareer(rng, pmcRaids, survivalRate, kpr, leaveRate, runRate, minutes, skew.Streak, menu);
+			var scav = BuildCareer(rng, scavRaids, Clamp(survivalRate * Range(rng, 0.8f, 1.1f), 0.1f, 0.75f), kpr * Range(rng, 0.7f, 1.0f), leaveRate, runRate, minutes * 0.8f, skew.Streak, 1f);
 
+			RaidSecondsByTotal[pmc.Seconds] = pmc.RaidSeconds;
 			descriptor.PmcStats.Eft = pmc.ToDescriptor();
 			descriptor.ScavStats.Eft = scav.ToDescriptor();
 
@@ -224,7 +303,7 @@ namespace WhosYourKiller
 
 			// bosses: expected kills = raids x meeting chance x chance to win, then a random actual count
 			var bosses = NewBosses();
-			var winChance = Clamp(0.15f + 0.12f * kd, 0.1f, 0.6f);
+			var winChance = Clamp(0.15f + 0.06f * kpr, 0.1f, 0.65f);
 			foreach (var boss in bosses)
 			{
 				boss.Kills = progress < boss.MinProgress ? 0 : Poisson(rng, pmcRaids * boss.EncounterPerRaid * winChance);
@@ -305,7 +384,7 @@ namespace WhosYourKiller
 			}
 
 			descriptor.AchievementsData = earned;
-			Plugin.Verbose($"Flavor stats for {profileId}: progress {progress} (level {level}, prestige {prestige}), personality '{(personality.Length == 0 ? "none" : personality)}', " +
+			Plugin.Verbose($"Flavor stats for {profileId}: progress {progress} (level {level}, prestige {prestige}), personality '{(personality.Length == 0 ? "none" : personality)}', archetype {arch.Name}, " +
 				$"{pmcRaids}+{scavRaids} raids, survival {pmc.Survived}/{pmcRaids}, K/D {(pmc.Deaths > 0 ? (float)pmc.Kills / pmc.Deaths : pmc.Kills):0.00}, streak {pmc.Streak}, {earned.Count} achievements");
 		}
 
@@ -313,7 +392,8 @@ namespace WhosYourKiller
 		private class Career
 		{
 			public int Raids, Survived, Left, Runners, Mia, Killed, Deaths, Kills, Streak;
-			public long Seconds;
+			public long Seconds;          // online time: raids plus menus
+			public long RaidSeconds;      // time spent inside raids only
 
 			public ProfileStatsDescriptor ToDescriptor()
 			{
@@ -336,7 +416,7 @@ namespace WhosYourKiller
 			}
 		}
 
-		private static Career BuildCareer(Random rng, int raids, float survivalRate, float kd, float leaveRate, float runRate, float minutes, float streakSkew)
+		private static Career BuildCareer(Random rng, int raids, float survivalRate, float kpr, float leaveRate, float runRate, float minutes, float streakSkew, float menu)
 		{
 			var c = new Career { Raids = raids };
 			c.Survived = (int)(raids * survivalRate);
@@ -355,7 +435,7 @@ namespace WhosYourKiller
 
 			c.Killed = raids - c.Survived - c.Left - c.Runners - c.Mia;
 			c.Deaths = c.Killed + c.Mia;
-			c.Kills = (int)(Math.Max(1, c.Deaths) * kd);
+			c.Kills = (int)Math.Min(raids * kpr, Math.Max(1, c.Deaths) * 60f);   // kills per raid, with a ceiling on K/D
 
 			// longest streak of survivals: for survival rate s over n raids the expected longest run is about ln(n(1-s)) / ln(1/s)
 			if (c.Survived > 0)
@@ -365,7 +445,8 @@ namespace WhosYourKiller
 				c.Streak = Math.Max(1, Math.Min(c.Survived, (int)Math.Round(expected * Range(rng, 0.7f, 1.4f) * streakSkew)));
 			}
 
-			c.Seconds = (long)(raids * minutes * 60f);
+			c.RaidSeconds = (long)(raids * minutes * 60f);
+			c.Seconds = (long)(c.RaidSeconds * menu);
 			return c;
 		}
 	}

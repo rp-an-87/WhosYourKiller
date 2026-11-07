@@ -4,7 +4,6 @@ using System.Reflection;
 using System.Threading.Tasks;
 using Comfort.Common;
 using EFT;
-using EFT.Hideout;
 using EFT.UI.SessionEnd;
 using HarmonyLib;
 using JsonType;
@@ -12,17 +11,70 @@ using SPT.Reflection.Patching;
 
 namespace WhosYourKiller
 {
-	// The game nulls AccountId/ProfileId in the killer record when the killer is AI, so the "watch profile" button never shows for bot kills
-	// and the server could not answer anyway (bots are not stored). We snapshot the bot's gear at the moment it kills us, give the killer record a
-	// private key, show the button, and answer the profile request locally with a mocked profile.
+	// The server cannot answer profile requests for bots (they are not stored), and the game hides the profile button for AI killers.
+	// We snapshot a bot's gear when it kills us or when we kill it, and answer the profile request locally with a mocked profile.
 	internal static class KillerPatches
 	{
 		private const string KeyPrefix = "wyk-";
+		private const int MaxSnapshots = 300;
 
-		// key -> mocked profile of the bot that killed us. Only the last kill matters, but a few are kept in case of several deaths in one session.
+		// key -> mocked profile; the oldest are dropped past MaxSnapshots
 		private static readonly Dictionary<string, OtherPlayerProfileDescriptor> Snapshots = new Dictionary<string, OtherPlayerProfileDescriptor>();
+		private static readonly Queue<string> SnapshotOrder = new Queue<string>();
 
 		private static bool IsOurKey(string accountId) => accountId != null && accountId.StartsWith(KeyPrefix, StringComparison.Ordinal);
+
+		internal static string KeyFor(string profileId) => KeyPrefix + profileId;
+
+		internal static bool HasSnapshot(string key) => key != null && Snapshots.ContainsKey(key);
+
+		// Mocked profile of a bot, keyed by its profile id. Returns the key.
+		private static string Capture(Profile botProfile, Player bot, string what)
+		{
+			var key = KeyFor(botProfile.Id);
+			var info = botProfile.Info;
+
+			var descriptor = new OtherPlayerProfileDescriptor
+			{
+				AccountId = key,
+				Info = new OtherPlayerProfile.OtherPlayerInfo
+				{
+					Nickname = info.Nickname,
+					Side = info.Side,
+					Experience = info.Experience,
+					PrestigeLevel = info.PrestigeLevel,
+					MemberCategory = info.MemberCategory,
+					SelectedMemberCategory = info.SelectedMemberCategory,
+					RegistrationDate = info.RegistrationDate,
+				},
+				AchievementsData = new Dictionary<MongoID, int>(),
+				Customization = new Dictionary<EBodyModelPart, MongoID>(botProfile.Customization),
+				Equipment = new InventoryEquipmentDescriptor(botProfile.Inventory.Equipment),
+				PmcStats = new ProfileStatsSeparatorDescriptor { Eft = new ProfileStatsDescriptor() },
+				ScavStats = new ProfileStatsSeparatorDescriptor { Eft = new ProfileStatsDescriptor() },
+				Skills = new SkillsDescriptor(),
+				FavoriteItems = new FlatItem[0],
+			};
+
+			// Invented career stats and achievements, for PMC bots
+			if (FlavorStats.GetsCareer(botProfile))
+			{
+				FlavorStats.Apply(descriptor, botProfile.Id, ProfileInfo.GetLevel(info.Experience), info.Experience, info.PrestigeLevel, FlavorStats.GetPersonality(bot));
+			}
+
+			if (!Snapshots.ContainsKey(key))
+			{
+				SnapshotOrder.Enqueue(key);
+				while (SnapshotOrder.Count > MaxSnapshots)
+				{
+					Snapshots.Remove(SnapshotOrder.Dequeue());
+				}
+			}
+
+			Snapshots[key] = descriptor;
+			Plugin.Verbose($"Snapshot of {what} '{info.Nickname}' (role {info.Settings?.Role}, side {info.Side}) stored as {key}");
+			return key;
+		}
 
 		internal class SnapshotPatch : ModulePatch
 		{
@@ -33,56 +85,33 @@ namespace WhosYourKiller
 			{
 				try
 				{
-					if (__instance == null || !__instance.IsYourPlayer || aggressor == null || !aggressor.IsAI)
+					if (__instance == null || aggressor == null)
 					{
 						return;
 					}
 
-					var stats = __instance.Profile?.EftStats?.Aggressor;
-					var botProfile = aggressor.Profile;
-					if (stats == null || botProfile == null)
+					// We died to a bot: snapshot the killer and give the killer record our key
+					if (__instance.IsYourPlayer)
 					{
-						return;
-					}
-
-					var key = KeyPrefix + botProfile.Id;
-					var info = botProfile.Info;
-
-					var descriptor = new OtherPlayerProfileDescriptor
-					{
-						AccountId = key,
-						Info = new OtherPlayerProfile.OtherPlayerInfo
+						var stats = __instance.Profile?.EftStats?.Aggressor;
+						if (!aggressor.IsAI || stats == null || aggressor.Profile == null)
 						{
-							Nickname = info.Nickname,
-							Side = info.Side,
-							Experience = info.Experience,
-							PrestigeLevel = info.PrestigeLevel,
-							MemberCategory = info.MemberCategory,
-							SelectedMemberCategory = info.SelectedMemberCategory,
-							RegistrationDate = info.RegistrationDate,
-						},
-						AchievementsData = new Dictionary<MongoID, int>(),
-						Customization = new Dictionary<EBodyModelPart, MongoID>(botProfile.Customization),
-						Equipment = new InventoryEquipmentDescriptor(botProfile.Inventory.Equipment),
-						PmcStats = new ProfileStatsSeparatorDescriptor { Eft = new ProfileStatsDescriptor() },
-						ScavStats = new ProfileStatsSeparatorDescriptor { Eft = new ProfileStatsDescriptor() },
-						Skills = new SkillsDescriptor(),
-						FavoriteItems = new FlatItem[0],
-					};
+							return;
+						}
 
-					// Invented career stats and achievements, only for scav users (player-like scavs)
-					if (FlavorStats.IsScavUser(botProfile))
-					{
-						FlavorStats.Apply(descriptor, botProfile.Id, ProfileInfo.GetLevel(info.Experience), info.PrestigeLevel, FlavorStats.GetPersonality(aggressor as Player));
+						stats.AccountId = Capture(aggressor.Profile, aggressor as Player, "killer");
+						return;
 					}
 
-					Snapshots[key] = descriptor;
-					stats.AccountId = key;
-					Plugin.Verbose($"Snapshot of killer '{info.Nickname}' (role {info.Settings?.Role}, side {info.Side}) stored as {key}");
+					// We killed a bot: snapshot the victim for the kill list
+					if (aggressor.IsYourPlayer && __instance.IsAI && __instance.Profile != null)
+					{
+						Capture(__instance.Profile, __instance, "victim");
+					}
 				}
 				catch (Exception e)
 				{
-					Plugin.Log.LogError($"Killer snapshot failed: {e}");
+					Plugin.Log.LogError($"Snapshot failed: {e}");
 				}
 			}
 		}
@@ -136,6 +165,44 @@ namespace WhosYourKiller
 			}
 		}
 
+		// Make the rows of the post-raid kill list clickable: a click opens the victim's (mocked) profile
+		internal class KillListPatch : ModulePatch
+		{
+			protected override MethodBase GetTargetMethod() => AccessTools.Method(typeof(KillListVictim), nameof(KillListVictim.Show));
+
+			[PatchPostfix]
+			private static void Postfix(KillListVictim __instance, VictimStats victim, bool knownName)
+			{
+				try
+				{
+					var row = __instance.GetComponent<VictimRowClick>();
+					var key = victim == null ? null : KeyFor(victim.ProfileId);
+					var known = knownName || victim?.Side == EPlayerSide.Savage;   // the same rule the row uses to show the name
+
+					if (key == null || !Snapshots.ContainsKey(key) || (!known && !Plugin.ViewUnknownVictims.Value))
+					{
+						if (row != null)
+						{
+							row.Key = null;
+						}
+
+						return;
+					}
+
+					if (row == null)
+					{
+						row = __instance.gameObject.AddComponent<VictimRowClick>();
+					}
+
+					row.Key = key;
+				}
+				catch (Exception e)
+				{
+					Plugin.Log.LogError($"Kill list row failed: {e}");
+				}
+			}
+		}
+
 		// Answer the profile request locally for our keys instead of asking the server
 		internal class MockProfilePatch : ModulePatch
 		{
@@ -150,7 +217,7 @@ namespace WhosYourKiller
 				}
 
 				__result = Task.FromResult(new Result<OtherPlayerProfileDescriptor> { Value = descriptor });
-				Plugin.Verbose($"Answered profile request {accountId} with the mocked killer profile");
+				Plugin.Verbose($"Answered profile request {accountId} with the mocked profile");
 				return false;
 			}
 		}
