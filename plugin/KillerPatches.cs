@@ -24,6 +24,30 @@ namespace WhosYourKiller
 
 		private static bool IsOurKey(string accountId) => accountId != null && accountId.StartsWith(KeyPrefix, StringComparison.Ordinal);
 
+		private static void Clear()
+		{
+			Snapshots.Clear();
+			SnapshotOrder.Clear();
+		}
+
+		// A new raid starts: drop the snapshots of the previous one (its death screen and kill list are long gone)
+		internal class RaidStartPatch : ModulePatch
+		{
+			protected override MethodBase GetTargetMethod() => AccessTools.Method(typeof(GameWorld), nameof(GameWorld.OnGameStarted));
+
+			[PatchPrefix]
+			private static void Prefix(GameWorld __instance)
+			{
+				if (__instance is HideoutGameWorld || Snapshots.Count == 0)
+				{
+					return;
+				}
+
+				Plugin.Verbose($"Raid started: cleared {Snapshots.Count} snapshots");
+				Clear();
+			}
+		}
+
 		internal static string KeyFor(string profileId) => KeyPrefix + profileId;
 
 		internal static bool HasSnapshot(string key) => key != null && Snapshots.ContainsKey(key);

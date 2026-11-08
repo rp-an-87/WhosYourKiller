@@ -34,6 +34,7 @@ namespace WhosYourKiller
 			new KillerPatches.KillListPatch().Enable();
 			new KillerPatches.ShowButtonPatch().Enable();
 			new KillerPatches.MockProfilePatch().Enable();
+			new KillerPatches.RaidStartPatch().Enable();
 			new StatsPanelPatch().Enable();
 
 			Log.LogInfo($"{PluginName} {PluginVersion} loaded");
